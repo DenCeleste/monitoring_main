@@ -9,6 +9,8 @@ import os
 import csv
 import json
 import queue
+import re
+from urllib.parse import urlparse
 
 try:
     import matplotlib
@@ -19,12 +21,6 @@ try:
     HAS_MPL = True
 except ImportError:
     HAS_MPL = False
-
-try:
-    from PIL import Image, ImageDraw, ImageTk
-    HAS_PIL = True
-except ImportError:
-    HAS_PIL = False
 
 
 DB_PATH = "monitor.db"
@@ -71,31 +67,9 @@ class SiteMonitorApp:
         self.setup_ui()
         self.apply_theme()
         self.refresh_site_tree()
-        self.setup_icon()
 
         self.root.after(200, self.poll_results)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-
-    # ---------- Иконка ----------
-    def setup_icon(self):
-        if not HAS_PIL:
-            return
-        try:
-            img = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
-            d = ImageDraw.Draw(img)
-            d.ellipse((2, 2, 62, 62), fill=(52, 152, 219, 255))
-            d.ellipse((18, 18, 46, 46), fill=(46, 204, 113, 255))
-            for (a, b, c, e) in [(32, 2, 32, 18), (32, 46, 32, 62),
-                                 (2, 32, 18, 32), (46, 32, 62, 32)]:
-                d.line((a, b, c, e), fill=(255, 255, 255, 255), width=4)
-            self.icon_photo = ImageTk.PhotoImage(img)
-            self.root.iconphoto(True, self.icon_photo)
-            try:
-                img.save('icon.ico')
-            except Exception:
-                pass
-        except Exception:
-            pass
 
     # ---------- БД ----------
     def init_db(self):
@@ -146,6 +120,8 @@ class SiteMonitorApp:
 
         ttk.Button(toolbar, text="➕ Добавить", command=self.add_site).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="➖ Удалить", command=self.remove_site).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="📥 Импорт TXT", command=self.import_txt).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="📤 Экспорт TXT", command=self.export_txt).pack(side=tk.LEFT, padx=2)
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
 
         self.start_btn = ttk.Button(toolbar, text="▶ Старт", command=self.start_monitoring)
@@ -296,7 +272,6 @@ class SiteMonitorApp:
             style.configure(w, fieldbackground=t['field'], foreground=t['fg'],
                             background=t['field'])
 
-        # Цветные теги
         self.sites_tree.tag_configure('ok', foreground=t['ok'])
         self.sites_tree.tag_configure('fail', foreground=t['error'])
         self.sites_tree.tag_configure('error', foreground=t['warn'])
@@ -367,6 +342,82 @@ class SiteMonitorApp:
         self.sites = [s for s in self.sites if s['url'] != url]
         self.save_sites()
         self.refresh_site_tree()
+
+    # ---------- Импорт / экспорт TXT ----------
+    def import_txt(self):
+        path = filedialog.askopenfilename(
+            title="Импорт списка URL",
+            filetypes=[('Text files', '*.txt'), ('All files', '*.*')]
+        )
+        if not path:
+            return
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                raw = f.read()
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось прочитать файл:\n{e}")
+            return
+
+        # Режем по ; и переводам строк (\r\n, \n, \r) одновременно
+        parts = re.split(r'[;\r\n]+', raw)
+
+        existing = {s['url'] for s in self.sites}
+        added = 0
+        skipped = 0
+        invalid = 0
+
+        for p in parts:
+            url = p.strip()
+            if not url:
+                continue
+            if not url.startswith(('http://', 'https://')):
+                url = 'https://' + url
+            try:
+                parsed = urlparse(url)
+                if not parsed.netloc:
+                    invalid += 1
+                    continue
+            except Exception:
+                invalid += 1
+                continue
+            if url in existing:
+                skipped += 1
+                continue
+            name = parsed.netloc or url
+            self.sites.append({'name': name, 'url': url})
+            existing.add(url)
+            added += 1
+
+        if added:
+            self.save_sites()
+            self.refresh_site_tree()
+
+        messagebox.showinfo(
+            "Импорт завершён",
+            f"Добавлено: {added}\n"
+            f"Пропущено (дубликаты): {skipped}\n"
+            f"Некорректных строк: {invalid}"
+        )
+
+    def export_txt(self):
+        if not self.sites:
+            messagebox.showinfo("Экспорт", "Список сайтов пуст.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Экспорт списка URL",
+            defaultextension='.txt',
+            filetypes=[('Text files', '*.txt'), ('All files', '*.*')]
+        )
+        if not path:
+            return
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                for s in self.sites:
+                    f.write(s['url'] + '\n')
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось сохранить файл:\n{e}")
+            return
+        messagebox.showinfo("Экспорт", f"Сохранено {len(self.sites)} URL в:\n{path}")
 
     # ---------- Мониторинг ----------
     def start_monitoring(self):
